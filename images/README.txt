@@ -1,0 +1,1 @@
+Put your character picture here and name it character.png

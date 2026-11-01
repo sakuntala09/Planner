@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+# Soft pastel colors. Change these hex codes to match your character.
+primaryColor = "#F48FB1"
+backgroundColor = "#FFF8FB"
+secondaryBackgroundColor = "#FCE4EC"
+textColor = "#4A3B47"
+font = "sans serif"
+
+[server]
+headless = true

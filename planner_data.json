@@ -1,0 +1,93 @@
+{
+  "users": {
+    "puja09": {
+      "name": "Puja",
+      "salt": "e6deda7bfc9e2df2586b83ad866f4771",
+      "hash": "41fb462bd7649eb47dff91fbec68dc4c8e31d0d9a62b143d587c332ed09926a1",
+      "visits": {
+        "study": [
+          "2026-11-01"
+        ],
+        "meal": [
+          "2026-11-01"
+        ],
+        "selfcare": [
+          "2026-11-01"
+        ],
+        "finance": [
+          "2026-11-01"
+        ]
+      },
+      "study": {
+        "timetable": {},
+        "todos": [],
+        "minutes": {},
+        "notes": {}
+      },
+      "meal": {
+        "days": {
+          "2026-10-26": {
+            "plan": {},
+            "eaten": {}
+          },
+          "2026-10-27": {
+            "plan": {},
+            "eaten": {}
+          },
+          "2026-10-28": {
+            "plan": {},
+            "eaten": {}
+          },
+          "2026-10-29": {
+            "plan": {},
+            "eaten": {}
+          },
+          "2026-10-30": {
+            "plan": {},
+            "eaten": {}
+          },
+          "2026-10-31": {
+            "plan": {},
+            "eaten": {}
+          },
+          "2026-11-01": {
+            "plan": {
+              "Breakfast": "Roti milk",
+              "Lunch": "nothing",
+              "Snacks": "banana",
+              "Dinner": "fried rice"
+            },
+            "eaten": {
+              "Breakfast": true,
+              "Snacks": true,
+              "Dinner": true
+            }
+          }
+        },
+        "week_notes": {
+          "2026-10-26": ""
+        },
+        "grocery": []
+      },
+      "selfcare": {
+        "checkins": {
+          "2026-11-01": {
+            "mood": 2,
+            "stress": 2,
+            "sleep_hours": 7.0,
+            "sleep_quality": "Okay",
+            "good": "",
+            "bad": "",
+            "water": 6
+          }
+        }
+      },
+      "finance": {
+        "months": {},
+        "fixed": [],
+        "daily": [],
+        "debts": []
+      }
+    }
+  }
+}
