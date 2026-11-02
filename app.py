@@ -16,6 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 import streamlit as st
 
 # ------------------------------------------------------------------
@@ -25,6 +26,7 @@ TIMEZONE = "Asia/Kolkata"  # so "today" is correct for you, not the server
 CURRENCY = "₹"
 WATER_GOAL = 8  # glasses per day
 DATA_FILE = Path(os.environ.get("PLANNER_DATA", "planner_data.json"))
+DB_TABLE = "planner_users"  # the Supabase table name
 IMAGE_DIR = Path("images")  # put character.png in this folder
 
 # Calendar colors (keep them close to .streamlit/config.toml)
@@ -98,8 +100,73 @@ def today():
         return date.today()
 
 
-def load_db():
-    """Read all saved data from the JSON file."""
+# ---- Storage: Supabase when it is set up, otherwise a local JSON file ----
+class DatabaseError(Exception):
+    """Shown on screen when the database cannot be reached."""
+
+
+def supabase_settings():
+    """Return (url, key) if Supabase is set up in Secrets, otherwise None."""
+    try:
+        cfg = st.secrets["supabase"]
+        return str(cfg["url"]).rstrip("/"), str(cfg["key"])
+    except Exception:
+        return None
+
+
+def api_headers(key, extra=None):
+    """Headers Supabase needs. New 'sb_secret_' keys go ONLY in `apikey`;
+    old service_role keys (they start with 'eyJ') also go in Authorization."""
+    headers = {"apikey": key, "Content-Type": "application/json"}
+    if key.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {key}"
+    headers.update(extra or {})
+    return headers
+
+
+def check_response(response):
+    if response.status_code >= 400:
+        hint = ""
+        if response.status_code in (401, 403):
+            hint = " Check the key in your Streamlit Secrets."
+        elif response.status_code == 404:
+            hint = " Check the project URL and that the table exists (run the SQL setup)."
+        raise DatabaseError(f"Database error ({response.status_code}).{hint}")
+
+
+def supabase_get(cfg, username):
+    url, key = cfg
+    try:
+        response = requests.get(
+            f"{url}/rest/v1/{DB_TABLE}",
+            params={"username": f"eq.{username}", "select": "data"},
+            headers=api_headers(key),
+            timeout=15,
+        )
+    except requests.RequestException:
+        raise DatabaseError("Could not reach the database. Check your internet and try again.") from None
+    check_response(response)
+    rows = response.json()
+    return rows[0]["data"] if rows else None
+
+
+def supabase_save(cfg, users):
+    url, key = cfg
+    rows = [{"username": name, "data": record} for name, record in users.items()]
+    try:
+        response = requests.post(
+            f"{url}/rest/v1/{DB_TABLE}",
+            params={"on_conflict": "username"},
+            headers=api_headers(key, {"Prefer": "resolution=merge-duplicates,return=minimal"}),
+            json=rows,
+            timeout=15,
+        )
+    except requests.RequestException:
+        raise DatabaseError("Could not reach the database. Check your internet and try again.") from None
+    check_response(response)
+
+
+def read_json_file():
     if DATA_FILE.exists():
         try:
             return json.loads(DATA_FILE.read_text(encoding="utf-8"))
@@ -108,11 +175,54 @@ def load_db():
     return {"users": {}}
 
 
-def save_db(db):
-    """Write all data back to the JSON file (safe write via a temp file)."""
+def write_json_file(db):
+    """Safe write: write a temp file first, then swap it in."""
     tmp = DATA_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(db, indent=2), encoding="utf-8")
     tmp.replace(DATA_FILE)
+
+
+def valid_username(name):
+    return len(name) >= 3 and name.replace("_", "").isalnum()
+
+
+def user_cache():
+    return st.session_state.setdefault("_user_cache", {})
+
+
+def clear_user_cache():
+    st.session_state["_user_cache"] = {}
+
+
+def fetch_user(username):
+    """Get ONE user's record (or None). Asked once per click, then reused."""
+    if not username or not valid_username(username):
+        return None
+    cache = user_cache()
+    if username in cache:
+        return cache[username]
+    cfg = supabase_settings()
+    record = supabase_get(cfg, username) if cfg else read_json_file()["users"].get(username)
+    if record is not None:
+        cache[username] = record
+    return record
+
+
+def save_users(users):
+    """Save one or more users: {username: record}."""
+    cfg = supabase_settings()
+    if cfg:
+        supabase_save(cfg, users)
+    else:
+        db = read_json_file()
+        db["users"].update(users)
+        write_json_file(db)
+    user_cache().update(users)
+
+
+def save_db(db):
+    """Save what current_user() gave you, after you changed it."""
+    save_users(db["users"])
 
 
 def hash_password(password, salt_hex):
@@ -136,8 +246,11 @@ def new_user_data():
 def current_user():
     """Return (whole database, the logged-in user's record).
     Missing parts are filled in, so older saved data keeps working."""
-    db = load_db()
-    user = db["users"][st.session_state.username]
+    username = st.session_state.username
+    user = fetch_user(username)
+    if user is None:
+        raise DatabaseError("Your account was not found. Please log in again.")
+    db = {"users": {username: user}}
     for key, empty in new_user_data().items():
         part = user.setdefault(key, empty)
         if isinstance(empty, dict):
@@ -170,8 +283,7 @@ def money(amount):
 def flash(message):
     """Remember a message to show after the next page refresh."""
     st.session_state.flash = message
-
-
+    
 # ------------------------------------------------------------------
 # 3. NAVIGATION + SHARED PIECES
 # ------------------------------------------------------------------
@@ -354,8 +466,7 @@ def page_login():
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Log in")
         if submitted:
-            db = load_db()
-            user = db["users"].get(username.strip().lower())
+            user = fetch_user(username.strip().lower())
             ok = user is not None and hmac.compare_digest(
                 hash_password(password, user["salt"]), user["hash"]
             )
@@ -375,12 +486,11 @@ def page_login():
             created = st.form_submit_button("Create account")
         if created:
             uname = new_username.strip().lower()
-            db = load_db()
             if not name.strip():
                 st.error("Please enter your name.")
-            elif len(uname) < 3 or not uname.replace("_", "").isalnum():
+            elif not valid_username(uname):
                 st.error("Username: at least 3 letters/numbers (underscore _ is allowed).")
-            elif uname in db["users"]:
+            elif fetch_user(uname) is not None:
                 st.error("That username is already taken.")
             elif len(new_password) < 6:
                 st.error("Password must be at least 6 characters.")
@@ -388,13 +498,16 @@ def page_login():
                 st.error("Passwords do not match.")
             else:
                 salt = secrets.token_hex(16)
-                db["users"][uname] = {
-                    "name": name.strip(),
-                    "salt": salt,
-                    "hash": hash_password(new_password, salt),
-                    **new_user_data(),
-                }
-                save_db(db)
+                save_users(
+                    {
+                        uname: {
+                            "name": name.strip(),
+                            "salt": salt,
+                            "hash": hash_password(new_password, salt),
+                            **new_user_data(),
+                        }
+                    }
+                )
                 st.session_state.username = uname
                 st.session_state.page = "home"
                 st.rerun()
@@ -961,10 +1074,12 @@ PAGES = {
 }
 
 init_state()
+clear_user_cache()  # every click starts with fresh data from the database
 
 # If someone is not logged in (or the account vanished), send them to login
 if st.session_state.page != "login":
-    if not st.session_state.username or st.session_state.username not in load_db()["users"]:
+    if not st.session_state.username or fetch_user(st.session_state.username) is None:
         logout()
 
 PAGES[st.session_state.page]()
+clear_user_cache()  # so the next click also starts fresh
