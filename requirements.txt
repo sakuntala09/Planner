@@ -1,3 +1,4 @@
 streamlit>=1.37
 pandas
 tzdata
+streamlit-cookies-controller

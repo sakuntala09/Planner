@@ -19,6 +19,11 @@ import pandas as pd
 import requests
 import streamlit as st
 
+try:  # reads cookies inside the browser (works on Streamlit Community Cloud)
+    from streamlit_cookies_controller import CookieController
+except Exception:  # not installed: we still try the server-side cookie below
+    CookieController = None
+
 # ------------------------------------------------------------------
 # 1. SETTINGS (change these easily)
 # ------------------------------------------------------------------
@@ -28,6 +33,7 @@ WATER_GOAL = 8  # glasses per day
 DATA_FILE = Path(os.environ.get("PLANNER_DATA", "planner_data.json"))
 DB_TABLE = "planner_users"  # the Supabase table name
 COOKIE_NAME = "planner_login"  # the 'remember me' cookie kept in your browser
+COOKIE_STORE_KEY = "planner_cookie_store"  # where the browser's cookies are kept in memory
 REMEMBER_DAYS = 30  # how long "Keep me logged in" lasts
 MAX_DEVICES = 5  # how many phones/computers can stay logged in at once
 IMAGE_DIR = Path("images")  # put character.png in this folder
@@ -235,12 +241,19 @@ def token_hash(token):
 
 
 def cookie_at_start():
-    """The remember-me cookie the browser sent when the app was opened (or None)."""
-    try:
-        value = st.context.cookies.get(COOKIE_NAME)
-    except Exception:
-        return None
-    return value if isinstance(value, str) else None
+    """The remember-me cookie from the browser (or None).
+    First we look at what the browser told us (cookie library); if that is
+    empty we also try the cookie the server received when the page opened."""
+    value = None
+    store = st.session_state.get(COOKIE_STORE_KEY)
+    if isinstance(store, dict):
+        value = store.get(COOKIE_NAME)
+    if not (isinstance(value, str) and value):
+        try:
+            value = st.context.cookies.get(COOKIE_NAME)
+        except Exception:
+            value = None
+    return value if isinstance(value, str) and value else None
 
 
 def start_remember_session(username, user):
@@ -256,11 +269,12 @@ def start_remember_session(username, user):
 
 def try_auto_login():
     """New visit with a valid remember-me cookie? Log in without a password."""
-    if st.session_state.username or st.session_state.get("auto_login_checked"):
+    if st.session_state.username or st.session_state.get("logged_out"):
         return
-    st.session_state.auto_login_checked = True  # only check once per visit
     raw = cookie_at_start()
-    if not raw:
+    # The browser reports its cookies a moment after the page opens, so this
+    # runs on every click until a cookie shows up. A bad cookie is checked once.
+    if not raw or raw == st.session_state.get("bad_cookie"):
         return
     username, _, token = raw.partition(".")
     user = fetch_user(username)
@@ -273,6 +287,7 @@ def try_auto_login():
                 st.session_state.session_token = token
                 st.session_state.page = "home"
                 return
+    st.session_state.bad_cookie = raw  # do not check this cookie again
     st.session_state.cookie_target = ""  # cookie is old or wrong: delete it
 
 
@@ -387,7 +402,7 @@ def logout():
     for key in ("username", "timer", "timer_message", "flash", "session_token"):
         st.session_state[key] = None
     st.session_state.page = "login"
-    st.session_state.auto_login_checked = True  # don't log in again from the old cookie
+    st.session_state.logged_out = True  # don't log in again from the old cookie
     st.session_state.cookie_target = ""  # delete the cookie from the browser
 
 
@@ -1192,6 +1207,9 @@ PAGES = {
 }
 
 init_state()
+if CookieController is not None:
+    CookieController(key=COOKIE_STORE_KEY)  # asks the browser for its cookies
+    
 clear_user_cache()  # every click starts with fresh data from the database
 try_auto_login()  # remembered device? log in without a password
 
