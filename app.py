@@ -27,6 +27,9 @@ CURRENCY = "₹"
 WATER_GOAL = 8  # glasses per day
 DATA_FILE = Path(os.environ.get("PLANNER_DATA", "planner_data.json"))
 DB_TABLE = "planner_users"  # the Supabase table name
+COOKIE_NAME = "planner_login"  # the 'remember me' cookie kept in your browser
+REMEMBER_DAYS = 30  # how long "Keep me logged in" lasts
+MAX_DEVICES = 5  # how many phones/computers can stay logged in at once
 IMAGE_DIR = Path("images")  # put character.png in this folder
 
 # Calendar colors (keep them close to .streamlit/config.toml)
@@ -109,7 +112,7 @@ def supabase_settings():
     """Return (url, key) if Supabase is set up in Secrets, otherwise None."""
     try:
         cfg = st.secrets["supabase"]
-        return str(cfg["url"]).rstrip("/"), str(cfg["key"])
+        return str(cfg["url"]).strip().rstrip("/"), str(cfg["key"]).strip()
     except Exception:
         return None
 
@@ -225,6 +228,76 @@ def save_db(db):
     save_users(db["users"])
 
 
+# ---- "Keep me logged in" (remember me) ----
+def token_hash(token):
+    """Scrambled copy of a token. The database keeps only this, never the token."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def cookie_at_start():
+    """The remember-me cookie the browser sent when the app was opened (or None)."""
+    try:
+        value = st.context.cookies.get(COOKIE_NAME)
+    except Exception:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def start_remember_session(username, user):
+    """Make a secret token for this device. Call save_users() after this."""
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    alive = [s for s in user.get("sessions", []) if s["expires"] > now]
+    alive.append({"hash": token_hash(token), "expires": now + REMEMBER_DAYS * 86400})
+    user["sessions"] = alive[-MAX_DEVICES:]  # oldest devices fall off the list
+    st.session_state.session_token = token
+    st.session_state.cookie_target = f"{username}.{token}"  # to be written to the browser
+
+
+def try_auto_login():
+    """New visit with a valid remember-me cookie? Log in without a password."""
+    if st.session_state.username or st.session_state.get("auto_login_checked"):
+        return
+    st.session_state.auto_login_checked = True  # only check once per visit
+    raw = cookie_at_start()
+    if not raw:
+        return
+    username, _, token = raw.partition(".")
+    user = fetch_user(username)
+    if user and token:
+        now = time.time()
+        wanted = token_hash(token)
+        for s in user.get("sessions", []):
+            if s["expires"] > now and hmac.compare_digest(s["hash"], wanted):
+                st.session_state.username = username
+                st.session_state.session_token = token
+                st.session_state.page = "home"
+                return
+    st.session_state.cookie_target = ""  # cookie is old or wrong: delete it
+
+
+def sync_cookie():
+    """Write (or delete) the remember-me cookie in the browser with a tiny script."""
+    target = st.session_state.get("cookie_target")
+    if target is None:
+        return
+    max_age = REMEMBER_DAYS * 86400 if target else 0
+    script = (
+        "<script>(function(){"
+        "var d; try { d = window.parent.document; d.cookie; } catch (e) { d = document; }"
+        "var s = (window.location.protocol === 'https:') ? '; Secure' : '';"
+        f"d.cookie = {json.dumps(COOKIE_NAME + '=' + target)}"
+        f" + '; Max-Age={max_age}; path=/; SameSite=Lax' + s;"
+        "})();</script>"
+    )
+    if hasattr(st, "iframe"):  # newer Streamlit
+        st.iframe(script, height="content")
+    else:  # older Streamlit
+        import streamlit.components.v1 as components
+
+        components.html(script, height=0)
+        
+        
 def hash_password(password, salt_hex):
     """Turn a password into a scrambled string. We never store the real one."""
     return hashlib.pbkdf2_hmac(
@@ -300,9 +373,33 @@ def go(page):
 
 
 def logout():
-    for key in ("username", "timer", "timer_message", "flash"):
+    username = st.session_state.get("username")
+    token = st.session_state.get("session_token")
+    if username and token:  # forget this device on the server too
+        try:
+            user = fetch_user(username)
+            if user:
+                gone = token_hash(token)
+                user["sessions"] = [s for s in user.get("sessions", []) if s["hash"] != gone]
+                save_users({username: user})
+        except DatabaseError:
+            pass  # still log out on screen even if the database is unreachable
+    for key in ("username", "timer", "timer_message", "flash", "session_token"):
         st.session_state[key] = None
     st.session_state.page = "login"
+    st.session_state.auto_login_checked = True  # don't log in again from the old cookie
+    st.session_state.cookie_target = ""  # delete the cookie from the browser
+
+
+def logout_everywhere():
+    """Forget ALL devices (use this if you lose your phone)."""
+    username = st.session_state.get("username")
+    user = fetch_user(username) if username else None
+    if user:
+        user["sessions"] = []
+        save_users({username: user})
+    st.session_state.session_token = None
+    logout()
 
 
 def page_header(title, back_to, back_label="⬅ Back"):
@@ -464,15 +561,20 @@ def page_login():
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
+            remember = st.checkbox(f"Keep me logged in on this device ({REMEMBER_DAYS} days)", value=True)
             submitted = st.form_submit_button("Log in")
         if submitted:
-            user = fetch_user(username.strip().lower())
+            uname = username.strip().lower()
+            user = fetch_user(uname)
             ok = user is not None and hmac.compare_digest(
                 hash_password(password, user["salt"]), user["hash"]
             )
             if ok:
-                st.session_state.username = username.strip().lower()
+                st.session_state.username = uname
                 st.session_state.page = "home"
+                if remember:
+                    start_remember_session(uname, user)
+                    save_users({uname: user})
                 st.rerun()
             else:
                 st.error("Wrong username or password.")
@@ -483,6 +585,9 @@ def page_login():
             new_username = st.text_input("Choose a username")
             new_password = st.text_input("Choose a password (min 6 characters)", type="password")
             confirm = st.text_input("Confirm password", type="password")
+            remember_new = st.checkbox(
+                f"Keep me logged in on this device ({REMEMBER_DAYS} days)", value=True, key="remember_new"
+            )
             created = st.form_submit_button("Create account")
         if created:
             uname = new_username.strip().lower()
@@ -498,20 +603,18 @@ def page_login():
                 st.error("Passwords do not match.")
             else:
                 salt = secrets.token_hex(16)
-                save_users(
-                    {
-                        uname: {
-                            "name": name.strip(),
-                            "salt": salt,
-                            "hash": hash_password(new_password, salt),
-                            **new_user_data(),
-                        }
-                    }
-                )
+                record = {
+                    "name": name.strip(),
+                    "salt": salt,
+                    "hash": hash_password(new_password, salt),
+                    **new_user_data(),
+                }
+                if remember_new:
+                    start_remember_session(uname, record)
+                save_users({uname: record})
                 st.session_state.username = uname
                 st.session_state.page = "home"
                 st.rerun()
-
 
 # ------------------------------------------------------------------
 # 5. PAGE: HOME (main menu)
@@ -1014,7 +1117,7 @@ def page_finance():
 # ------------------------------------------------------------------
 
 def page_settings():
-    page_header("⚙ Settings", "home", "⬅ Main Menu")
+    page_header("⚙ Settings", "dashboard", "⬅ Dashboard")
     _, user = current_user()
 
     st.subheader("Change name")
@@ -1047,8 +1150,23 @@ def page_settings():
         else:
             user["salt"] = secrets.token_hex(16)
             user["hash"] = hash_password(new, user["salt"])
+            # other devices must log in again with the new password
+            token = st.session_state.get("session_token")
+            keep = token_hash(token) if token else None
+            user["sessions"] = [s for s in user.get("sessions", []) if s["hash"] == keep]
             save_db(db)
             st.success("Password changed!")
+
+    st.subheader("Stay logged in")
+    _, user = current_user()
+    devices = sum(1 for s in user.get("sessions", []) if s["expires"] > time.time())
+    if st.session_state.get("session_token"):
+        st.caption("✅ This device stays logged in.")
+    else:
+        st.caption("This device will ask for your password next time. Log out and log in again with the tick box on.")
+    st.caption(f"Devices that stay logged in: {devices}")
+    st.caption("Cookie found when the app opened: " + ("yes" if cookie_at_start() else "no"))
+    st.button("Log out on all devices", on_click=logout_everywhere)
 
     st.divider()
     st.button("Log out", on_click=logout)
@@ -1075,6 +1193,7 @@ PAGES = {
 
 init_state()
 clear_user_cache()  # every click starts with fresh data from the database
+try_auto_login()  # remembered device? log in without a password
 
 # If someone is not logged in (or the account vanished), send them to login
 if st.session_state.page != "login":
@@ -1082,4 +1201,5 @@ if st.session_state.page != "login":
         logout()
 
 PAGES[st.session_state.page]()
+sync_cookie()  # write/delete the remember-me cookie in the browser
 clear_user_cache()  # so the next click also starts fresh
