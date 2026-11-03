@@ -19,6 +19,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
+
 try:  # reads cookies inside the browser (works on Streamlit Community Cloud)
     from streamlit_cookies_controller import CookieController
 except Exception:  # not installed: we still try the server-side cookie below
@@ -67,7 +68,14 @@ MOODS = ["😞 Very low", "😕 Low", "😐 Okay", "🙂 Good", "😄 Great"]
 SLEEP_QUALITY = ["Poor", "Okay", "Good"]
 SPEND_CATEGORIES = ["Food", "Travel", "Study", "Shopping", "Fun", "Other"]
 
-st.set_page_config(page_title="My Planner", page_icon="🌸", layout="centered")
+APP_NAME = "Izy"  # the name on the browser tab (and the default name for the home-screen shortcut)
+LOGO = Path(__file__).parent / "images" / "logo.png"  # your icon: a square PNG, 512 x 512 is best
+
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon=str(LOGO) if LOGO.exists() else "🌸",  # if logo.png is missing, show a flower
+    layout="centered",
+)
 
 # Soft, rounded look. Theme colors come from .streamlit/config.toml
 CSS = """
@@ -385,6 +393,38 @@ def init_state():
 def go(page):
     """Used as a button callback: switch to another page."""
     st.session_state.page = page
+    
+def url_page():
+    """The page named in the address bar (?p=dashboard), or None."""
+    value = st.query_params.get("p")
+    return value if isinstance(value, str) else None
+
+
+def follow_browser_history():
+    """Phone Back gesture / browser Back and Forward change the address.
+    When the address changed by itself, open the page it names."""
+    if not st.session_state.username:
+        return  # logged out: leave the address alone for now
+    wanted = url_page()
+    if wanted == st.session_state.get("url_page_seen", "__unset__"):
+        return  # same as last time: the app decides the page
+    st.session_state.url_page_seen = wanted
+    st.session_state.page = wanted if wanted in PAGES and wanted != "login" else "home"
+
+
+def update_browser_history():
+    """Write the current page into the address bar. Every new page becomes
+    one step of history, so the Back gesture goes to the previous page."""
+    if not st.session_state.username:
+        return
+    page = st.session_state.page
+    wanted = None if page in ("login", "home") else page  # home = the plain address
+    if url_page() != wanted:
+        if wanted is None:
+            del st.query_params["p"]
+        else:
+            st.query_params["p"] = wanted
+    st.session_state.url_page_seen = wanted
 
 
 def logout():
@@ -1209,9 +1249,9 @@ PAGES = {
 init_state()
 if CookieController is not None:
     CookieController(key=COOKIE_STORE_KEY)  # asks the browser for its cookies
-    
 clear_user_cache()  # every click starts with fresh data from the database
 try_auto_login()  # remembered device? log in without a password
+follow_browser_history()  # Back / Forward buttons open the right page
 
 # If someone is not logged in (or the account vanished), send them to login
 if st.session_state.page != "login":
@@ -1220,4 +1260,5 @@ if st.session_state.page != "login":
 
 PAGES[st.session_state.page]()
 sync_cookie()  # write/delete the remember-me cookie in the browser
+update_browser_history()  # show this page in the address bar (makes Back work)
 clear_user_cache()  # so the next click also starts fresh
